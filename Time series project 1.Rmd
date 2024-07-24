@@ -1,0 +1,501 @@
+---
+title: "Time series project"
+output: html_document
+---
+
+# Required Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(stringr)
+library(TSA)
+library(stringr)
+library(readr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(boxcoxmix)
+library(tseries)   
+library(lmtest)
+library(forecast)
+
+```
+
+
+# Introduction
+
+## Methodology
+
+To identify the most suitable ARIMA model for forecasting CO2 emissions, AIC and BIC values were calculated for various candidate models using custom functions. These functions simplified the process of extracting AIC and BIC values and computing accuracy metrics for different ARIMA model orders.
+
+```{r}
+acf_pacf <- function(ts_object, plot_note, figure_number){
+  # Produce ACF and PACF plots for a time series object.
+  # Specify a plot note (as a string) and figure number to improve plot titles.
+  # Example: acf_pacf(price_ts, "Box-Cox transformed, first differenced price series.", 1)
+  par(mfrow=c(1,2))
+  if (missing(plot_note)) {
+    acf(ts_object, main = paste("Figure", figure_number, "- ACF plot"), lag.max = min(c(length(ts_object), 50)))
+    pacf(ts_object, main = paste("Figure", figure_number, "- PACF plot"), lag.max = min(c(length(ts_object), 50)))
+  } else {
+    acf(ts_object, main = paste("Figure", figure_number, "- ACF", plot_note), lag.max = min(c(length(ts_object), 50)))
+    pacf(ts_object, main = paste("Figure", figure_number, "- PACF ", plot_note), lag.max = min(c(length(ts_object), 50)))
+  }
+  par(mfrow=c(1,1))
+}
+fit_arima_models <- function(ts_data, orders) {
+  methods <- c('CSS', 'ML')  # Define the methods to be used
+  df_Smodels <- data.frame(matrix(NA, nrow = length(orders) * length(methods), ncol = 8))  # Adjust the size of the data frame
+  
+  row_index <- 1
+  for (method in methods) {
+    for (order in orders) {
+      arima_model <- Arima(ts_data, order = order, method = method)
+      accuracy_metrics <- accuracy(arima_model)[1:7]
+      df_Smodels[row_index, 1:7] <- accuracy_metrics
+      df_Smodels[row_index, 8] <- method  # Add method to the last column
+      rownames(df_Smodels)[row_index] <- paste0("arima", paste(order, collapse = ","), "_", method)
+      row_index <- row_index + 1
+    }
+  }
+  
+  colnames(df_Smodels) <- c("ME", "RMSE", "MAE", "MPE", "MAPE", "MASE", "ACF1", "Method")
+  return(df_Smodels)
+}
+```
+
+
+```{r}
+residual_analysis <- function(model, std = TRUE, start = 2, shift = 0, class = c("ARIMA", "GARCH", "ARMA-GARCH", "garch", "fGARCH")[1]) {
+  library(TSA)
+  
+  # Determine the residuals based on the model class
+  if (class == "ARIMA") {
+    if (std == TRUE) {
+      res_model <- rstandard(model)
+    } else {
+      res_model <- residuals(model)
+    }
+  } else if (class %in% c("GARCH", "garch")) {
+    res_model <- model$residuals[start:model$n.used]
+  } else if (class == "ARMA-GARCH") {
+    res_model <- model@fit$residuals
+  } else if (class == "fGARCH") {
+    res_model <- model@residuals
+  } else {
+    stop("The argument 'class' must be either 'ARIMA', 'GARCH', 'ARMA-GARCH', 'garch', or 'fGARCH'")
+  }
+  
+  # Set up the plotting parameters
+  par(mfrow = c(1, 1), mar = c(5, 5, 2, 2), cex = 1.2)
+  
+  # Plot the standardized residuals
+  plot(res_model, type = 'o', ylab = 'Standardised residuals', 
+       main = " Figure 7: Time series plot of standardised residuals", 
+       cex.lab = 1.5, cex.main = 1.5, cex.axis = 1.2)
+  abline(h = 0)
+  
+  # Histogram of standardized residuals
+  hist(res_model, main = "Figure 7:Histogram of standardised residuals", 
+       cex.lab = 1.5, cex.main = 1.5, cex.axis = 1.2)
+  
+  # QQ plot of standardized residuals
+  qqnorm(res_model, main = "Figure 7:QQ plot of standardised residuals", 
+         cex.lab = 1.5, cex.main = 1.5, cex.axis = 1.2)
+  qqline(res_model, col = 2)
+  
+  # ACF of standardized residuals
+  acf(res_model, main = "Figure 7:ACF of standardised residuals", 
+      cex.lab = 1.5, cex.main = 1.5, cex.axis = 1.2)
+  
+  # Perform Shapiro-Wilk normality test
+  print(shapiro.test(res_model))
+  
+  # Perform Ljung-Box test
+  lagM <- ifelse(length(res_model) < 30, length(res_model) - 1, 30)
+  Box.test(res_model, lag = lagM, type = "Ljung-Box")
+  
+  # Reset plotting parameters
+  par(mfrow = c(1, 1))
+}
+```
+
+
+## Aim/Objectives
+
+This report summarizes the process followed to identify a suitable model for forecasting annual CO2 emissions in North America, measured in million metric tonnes of carbon dioxide. The report covers the analysis of the CO2 emissions series, the identification and fitting of appropriate models, selection of the most suitable model, performance of diagnostic checks, and forecasting of CO2 emissions for the next 10 years. The objectives include visually inspecting the time series data to understand trends and patterns, using statistical tests such as the Shapiro-Wilk, Augmented Dickey-Fuller (ADF), and Phillips-Perron (PP) tests to assess stationarity and normality, and applying first-level differencing to achieve stationarity. Further objectives involve analyzing Autocorrelation Function (ACF) and Partial Autocorrelation Function (PACF) plots to identify model parameters, fitting ARIMA models using Conditional Sum of Squares (CSS) and Maximum Likelihood (ML) methods, conducting residual analysis to ensure model adequacy, and ultimately forecasting future CO2 emissions for the next decade.
+
+## Dataset Description
+The CO2 emissions dataset contains annual CO2 emissions data for North America, measured in million metric tonnes of carbon dioxide, from 1960 to the present day. The dataset was sourced from Kaggle and includes comprehensive information on CO2 emissions compiled from various sources, including the United Nations Framework Convention on Climate Change (UNFCCC) and the International Energy Agency (IEA).
+
+
+
+
+
+
+```{r}
+#Reading dataset
+data <- read.csv("data.csv")
+```
+
+
+```{r echo=FALSE}
+# Renaming the second column
+data <- data %>%
+  rename(CO2_Emissions = `CO2.emissions..North.America..Annual..million.metric.tonnes.carbon.dioxide.`)
+```
+
+# Exploring the Data
+
+As the CO2 emissions data for North America contained annual observations, the data was converted to a time series object with a frequency of 1 and plotted to observe the key time series elements.
+
+```{r}
+# Converting the dataset to Time Series data
+emission_ts <- ts(data$CO2_Emissions,frequency = 1,start = 1949,end = 2018)
+summary(emission_ts)
+```
+**Table 1: Result from a summary of the Annual CO2 Emissions series in North America**
+
+The minimum and maximum values of CO2 emissions suggest that annual emissions have varied significantly over the period from 1949 to 2018. This variation is indicative of different factors influencing CO2 emissions over time, including changes in industrial activity, energy consumption patterns, and the implementation of environmental policies. The observed range, with emissions as low as 2,522 million metric tonnes and as high as 7,348 million metric tonnes, reflects periods of both reduced and heightened industrial activity and policy impact. The mean value of 4,565 million metric tonnes provides a central tendency of emissions over the studied period, highlighting the overall increase in emissions due to economic growth and energy demands in North America.
+
+## Time series Plot
+
+```{r}
+# Plot the time series data
+ts.plot(emission_ts, type = 'o', ylab = 'Emission', xlab = 'Year', main = 'Figure 1: Time series plot of Co2 Emission')
+```
+
+The time series plot of CO2 emissions in North America from 1949 to 2018 from figure 1 provides several insights:
+
+**Trend**:
+
+The plot exhibits a clear upward trend in CO2 emissions over the years, especially noticeable from the 1950s to the early 2000s. This suggests a general increase in emissions over time, likely due to industrial growth, increased energy consumption, and economic development.
+
+
+**Seasonality**
+
+Since the data is annual, there is no apparent seasonality visible in the plot. Seasonal effects, if any, would typically be observed in monthly or quarterly data.
+
+**behaviour**
+
+The behavior of the series indicates periods of rapid growth in emissions, particularly noticeable in the late 20th century. There are also periods of stagnation or slight decline, especially post-2008, likely corresponding to economic recessions or increased environmental regulations.
+
+**Changing Variance**
+
+There appears to be an increase in variance over time. In the earlier years, the emissions data points are closer together, while in the later years, there is more fluctuation in the values.
+
+**Change-point**
+
+A notable changepoint can be observed around the late 2000s to early 2010s, where the trend shifts from a steady increase to a more fluctuating pattern with some decline. This change could be attributed to global financial crises, shifts in energy policies, technological advancements in renewable energy, or increased awareness and regulations aimed at reducing CO2 emissions.
+
+
+##QQplot
+
+```{r}
+qqnorm(emission_ts,main ='  Figure 2 : QQ-Plot of Co2 Emmision', ylab ='Co2 Emmision')
+qqline(emission_ts, col =2)
+```
+
+The QQ-Plot of CO2 Emissions in figure 2 largely follow the red line, indicating that the residuals are approximately normally distributed. However, there are noticeable deviations at both the lower and upper ends, suggesting some skewness or heavy tails in the data. These deviations indicate potential non-normality in the residuals, which may need to be addressed in further analysis. Overall, while the residuals show a general conformity to normality, the tails suggest areas where the model might not perfectly capture the underlying distribution of the data.
+
+ 
+##Scatter Plot
+```{r}
+par(mfrow=c(1,1))
+plot(y = emission_ts, x=zlag(emission_ts), ylab='emission_ts', xlab='zlag', 
+     main = "  Figure 3 : Scatter plot") #Upward trend
+```
+
+The scatter plot in figure 3 of CO2 emissions against their lagged values demonstrates a strong linear relationship. The points are closely clustered around a straight line, indicating that the current values of CO2 emissions are highly correlated with their previous values. This linearity suggests the presence of a strong autoregressive component in the data. The consistent upward trend in the plot confirms the persistence of CO2 emissions over time.
+
+ 
+## Correlation
+```{r}
+y = emission_ts
+x = zlag(emission_ts)
+index = 2:length(x)
+cor(y[index],x[index])
+ 
+```
+The correlation coefficient of 0.9954712 between CO2 emissions and its lagged values confirms the strong positive linear relationship observed in the scatter plot. This high correlation supports the use of autoregressive models for forecasting and further analysis of the time series data.
+
+## Acf and Pacf Plot
+
+```{r}
+
+#Shapiro Test
+
+shapiro.test(emission_ts) 
+acf_pacf(emission_ts,"",4)
+
+
+adf.test(emission_ts, alternative = c("stationary")) 
+pp.test(emission_ts, alternative = c("stationary"))
+```
+
+The ACF (Autocorrelation Function) and PACF (Partial Autocorrelation Function) plots in figure 4 of the CO2 emissions time series reveal crucial insights about its properties. The ACF plot exhibits a gradual decline in autocorrelation values, indicative of a non-stationary time series where high correlations at low lags decrease slowly as the lag increases. This pattern, combined with significant positive autocorrelations at multiple lags, suggests strong temporal dependencies in the data. In contrast, the PACF plot shows a significant spike at lag 1, with autocorrelations at higher lags not being significant. This cut-off after lag 1 is characteristic of an autoregressive process.
+
+
+Overall, the ACF and PACF plots highlight the strong autoregressive structure of the CO2 emissions data and the need for differencing to address non-stationarity. 
+The results of the Augmented Dickey-Fuller (ADF) and Phillips-Perron (PP) tests confirm that the CO2 emissions time series is non-stationary, as indicated by high p-values (0.9798 and 0.99, respectively) and non-significant test statistics. This means the data has a changing mean and variance over time, which aligns with the observations from the ACF and PACF plots. To proceed with accurate time series modeling, the series must be differenced to achieve stationarity.
+ 
+# Model Specification 
+
+## First Level differencing
+```{r}
+diff_emission_ts <- diff(emission_ts, differences = 1)
+ts.plot(diff_emission_ts, type = 'o', ylab = 'Emission', xlab = 'Year', main = 'Figure 5: Time series plot of first difference series of \nCo2 Emission')
+```
+
+The time series plot of the first difference series in figure 5 of CO2 emissions displays the changes in CO2 emissions from one year to the next. This plot exhibits a more stationary behavior compared to the original series, as evidenced by the fluctuations around a constant mean. The presence of both positive and negative spikes indicates periods of significant increase and decrease in emissions, respectively. There is no evident trend, suggesting that the differencing has successfully removed the non-stationary components of the series.
+
+## Acf and Pacf Plot of differenced Series
+
+```{r}
+acf_pacf(diff_emission_ts,"of Differenced \n Series",6)
+```
+
+After performing the first differencing on the CO2 emissions time series, the ACF and PACF plots as infigure 6 of the differenced series suggest a more stationary process. The ACF plot shows a rapid decline in autocorrelation values, with most of the autocorrelations falling within the confidence bounds, indicating reduced serial correlation. The PACF plot exhibits significant spikes at the initial lags, which is expected in a differenced series.
+
+Given these observations, the following ARIMA models are considered suitable for further analysis:
+
+1.**ARIMA(3,1,4)**
+2.**ARIMA(3,1,3)**, 
+3.**ARIMA(2,1,3)**,
+4.**ARIMA(2,1,4)**
+5.**ARIMA(3,1,1)**
+6.**ARIMA(3,1,2)**
+
+## ADF and PP Test
+
+```{r}
+adf.test(diff_emission_ts, alternative = c("stationary")) 
+pp.test(diff_emission_ts, alternative = c("stationary"))
+ 
+```
+
+
+The results of the Augmented Dickey-Fuller (ADF) and Phillips-Perron (PP) tests on the differenced series support the stationarity of the data. The ADF test yields a p-value of 0.0457, which is below the 0.05 significance level, allowing us to reject the null hypothesis of a unit root and conclude that the differenced series is stationary. Similarly, the PP test shows a p-value of 0.01, also indicating stationarity. These results confirm that the first differencing has successfully transformed the non-stationary CO2 emissions time series into a stationary series, suitable for further modeling with techniques.
+
+
+
+## EACF Table
+
+```{r}
+eacf(diff_emission_ts, ar.max = 10, ma.max = 10)
+```
+The EACF table confirms the suitability of the following ARIMA models for the CO2 emissions data based on the observed patterns:
+
+**ARIMA(2,1,3)**
+**ARIMA(2,1,4)**
+**ARIMA(3,1,3)**
+**ARIMA(3,1,4)**
+
+## BIC Table
+```{r}
+res = armasubsets(y=diff_emission_ts , nar=5 , nma=5, y.name='p', ar.method='ols')
+plot(res)
+```
+
+
+The BIC table suggests the following ARIMA models as suitable candidates for the CO2 emissions data:
+
+1. **ARIMA(4,1,0)**
+2. **ARIMA(4,1,3)** 
+3. **ARIMA(2,1,3)**
+
+# Model Evaluation
+
+These models were evaluated and compared to select the most appropriate model for forecasting CO2 emissions.
+
+A more specific heading considering the use of CSS and ML methods could be:
+
+## Evaluation and Selection of ARIMA Models Using CSS and ML Methods
+```{r}
+models <- list(
+  arima_111_css = arima(emission_ts, order = c(1, 1, 1), method = 'CSS'),
+  arima_112_css = arima(emission_ts, order = c(1, 1, 2), method = 'CSS'),
+  arima_211_css = arima(emission_ts, order = c(2, 1, 1), method = 'CSS'),
+  arima_212_css = arima(emission_ts, order = c(2, 1, 2), method = 'CSS'),
+  arima_311_css = arima(emission_ts, order = c(3, 1, 1), method = 'CSS'),
+  arima_312_css = arima(emission_ts, order = c(3, 1, 2), method = 'CSS'),
+  arima_213_css = arima(emission_ts, order = c(2, 1, 3), method = 'CSS'),
+  arima_214_css = arima(emission_ts, order = c(2, 1, 4), method = 'CSS'),
+  arima_313_css = arima(emission_ts, order = c(3, 1, 3), method = 'CSS'),
+  arima_314_css = arima(emission_ts, order = c(3, 1, 4), method = 'CSS'),
+  arima_410_css = arima(emission_ts, order = c(4, 1, 0), method = 'CSS'),
+  arima_413_css = arima(emission_ts, order = c(4, 1, 3), method = 'CSS')
+)
+coef_tests <- lapply(models, coeftest)
+coef_tests
+ 
+ 
+models_1 <- list(
+  arima_111_ML = arima(emission_ts, order = c(1, 1, 1), method = 'ML'),
+  arima_112_ML = arima(emission_ts, order = c(1, 1, 2), method = 'ML'),
+  arima_211_ML = arima(emission_ts, order = c(2, 1, 1), method = 'ML'),
+  arima_212_ML = arima(emission_ts, order = c(2, 1, 2), method = 'ML'),
+  arima_311_ML = arima(emission_ts, order = c(3, 1, 1), method = 'ML'),
+  arima_312_ML = arima(emission_ts, order = c(3, 1, 2), method = 'ML'),
+  arima_213_ML = arima(emission_ts, order = c(2, 1, 3), method = 'ML'),
+  arima_214_ML = arima(emission_ts, order = c(2, 1, 4), method = 'ML'),
+  arima_313_ML = arima(emission_ts, order = c(3, 1, 3), method = 'ML'),
+  arima_314_ML = arima(emission_ts, order = c(3, 1, 4), method = 'ML'),
+  arima_410_ML = arima(emission_ts, order = c(4, 1, 0), method = 'ML'),
+  arima_413_ML = arima(emission_ts, order = c(4, 1, 3), method = 'ML')
+)
+coef_tests_1 <- lapply(models_1, coeftest)
+coef_tests_1
+
+```
+
+The models were evaluated based on the z test of their coefficients. The significant models (where the coefficients were statistically significant) were considered for further analysis.
+
+Based on the evaluation of the models using both CSS (Conditional Sum of Squares) and ML (Maximum Likelihood) methods, the ARIMA(3,1,4) model was selected as the most appropriate model for forecasting CO2 emissions in North America. This model had significant coefficients, and the diagnostic checks indicated that it provided a good fit to the data.
+
+The selected ARIMA(3,1,4) model was then used to forecast CO2 emissions for the next 10 years, providing insights into the future trend of emissions in North America.
+
+
+## Calculatation of AIC and BIC for each model
+```{r}
+data_ts <- emission_ts 
+orders <- list(c(1, 1, 1), c(1, 1, 2), c(2, 1, 1), c(2, 1, 2),c(3, 1, 1), c(3, 1, 2), c(2, 1, 3), c(2, 1, 4), c(3, 1, 3), c(3, 1, 4), c(4, 1, 0), c(4, 1, 3))
+result <- fit_arima_models(data_ts, orders)
+print(result)
+result_sorted <- result[order(result$RMSE), ]
+print(result_sorted) 
+```
+
+## Model Evaluation Summary
+
+The ARIMA models were evaluated using both Maximum Likelihood (ML) and Conditional Sum of Squares (CSS) methods. Below are the key metrics for the best-performing model:
+
+**Best Model: ARIMA(3,1,4) (ML Method)**
+- **Mean Error (ME):** 6.755
+- **Root Mean Square Error (RMSE):** 127.877
+- **Mean Absolute Error (MAE):** 101.787
+- **Mean Percentage Error (MPE):** 0.297
+- **Mean Absolute Percentage Error (MAPE):** 2.226
+- **Mean Absolute Scaled Error (MASE):** 0.774
+- **Autocorrelation of Residuals at Lag 1 (ACF1):** -0.011
+
+The ARIMA(3,1,4) model using the ML method demonstrated the lowest RMSE and MASE values, indicating it is the most accurate model for forecasting CO2 emissions.
+
+# Residual Analysis of ARIMA(3,1,4) Model
+
+```{r warning=FALSE}
+model_314_ml <- arima(data_ts, order = c(3,1, 4), method = 'ML')
+
+
+
+residual_analysis(model_314_ml, class = "ARIMA")
+
+
+```
+
+**Time Series Plot of Standardized Residuals**
+
+
+The time series plot of standardized residuals (Figure 7) shows that the residuals fluctuate around zero with no apparent trend. This suggests that the model has captured the underlying pattern in the data effectively. However, there are a few outliers which may indicate occasional deviations from the model.
+
+**Histogram of Standardized Residuals**
+
+
+The histogram of standardized residuals displays a relatively symmetrical distribution around zero, though it is slightly skewed to the right. The majority of residuals fall within the range of -2 to 2, which indicates that most of the residuals are small, but there are some larger residuals present.
+
+**QQ Plot of Standardized Residuals**
+
+
+The QQ plot of standardized residuals shows that the residuals follow a normal distribution fairly well, especially in the middle range. However, there are deviations at the tails, indicating that the residuals are not perfectly normally distributed, which is further supported by the Shapiro-Wilk test results.
+
+**ACF of Standardized Residuals**
+
+
+The ACF plot of standardized residuals shows that there are no significant autocorrelations at any lag. This suggests that the residuals are uncorrelated, indicating that the ARIMA model has adequately captured the autocorrelation structure of the data.
+
+**Shapiro-Wilk Normality Test**
+The Shapiro-Wilk normality test result is:
+- W = 0.94991
+- p-value = 0.007168
+
+The p-value is less than 0.05, indicating that we reject the null hypothesis of normality. This implies that the residuals are not perfectly normally distributed, which is consistent with the slight deviations observed in the QQ plot.
+
+**Ljung-Box Test**
+The Ljung-Box test results indicate that there is no significant autocorrelation in the residuals, further validating the adequacy of the ARIMA model in capturing the data's structure.
+
+### Conclusion
+The residual analysis of the ARIMA(3,1,4) model indicates that:
+
+1. The residuals fluctuate around zero with no apparent trend, suggesting an effective model fit.
+
+2. The histogram shows a relatively symmetrical distribution with some skewness.
+
+3. The QQ plot indicates that the residuals follow a normal distribution, with some deviations at the tails.
+
+4. The ACF plot shows no significant autocorrelations, confirming that the residuals are uncorrelated.
+
+5. The Shapiro-Wilk test rejects the hypothesis of normality, suggesting slight deviations from a normal distribution.
+
+6. The Ljung-Box test supports the absence of significant autocorrelation in the residuals.
+
+Overall, the ARIMA(3,1,4) model appears to be a good fit for the data, capturing the main patterns and leaving uncorrelated residuals, though there are minor deviations from normality.
+
+
+# Forecasting
+
+  
+```{r}
+
+model_314_ml <- Arima(data_ts, order = c(3, 1, 4), method = 'ML')
+
+
+forecast_values <- forecast(model_314_ml, h = 10)
+
+
+plot(forecast_values, main = "Forecast of CO2 Emissions", xlab = "Year", ylab = "CO2 Emissions", 
+     cex.lab = 1.5, cex.main = 1.5, cex.axis = 1.2, xaxt = "n")
+
+
+years <- seq(1949, 2018 + 10, by = 1)
+
+
+axis(1, at = seq(1949, 2018 + 10, by = 1), labels = seq(1949, 2018 + 10, by = 1), cex.axis = 0.7)
+
+
+```
+
+
+
+```{r echo=FALSE}
+forecast_df <- data.frame(
+  Year = 2019:2028,
+  Forecast = round(forecast_values$mean, 2)
+)
+
+
+print(forecast_df)
+```
+### Insights on Forecasted CO2 Emissions
+
+The forecasted CO2 emissions for North America from 2019 to 2028 show a fluctuating pattern. Here are some insights based on the given values:
+
+1. **General Trend**: 
+   The emissions appear to be relatively stable, with minor fluctuations over the forecasted period. This suggests that significant changes in CO2 emissions are not expected in the short term.
+
+2. **Peaks and Troughs**:
+    - The highest forecasted emission value is 6384.74 million metric tonnes in 2022, indicating a slight increase in emissions for that year.
+    - The lowest forecasted emission value is 6282.98 million metric tonnes in 2028, suggesting a decrease in emissions towards the end of the forecast period.
+
+3. **Short-term Variability**:
+    - The emissions slightly decrease from 6357.35 in 2019 to 6288.44 in 2020, followed by an increase to 6327.45 in 2021 and a further rise to 6384.74 in 2022.
+    - After 2022, the emissions drop again in 2023 to 6346.72, indicating a brief peak in 2022 followed by a reduction.
+
+4. **Long-term Outlook**:
+    - By 2028, the emissions are predicted to decrease to 6282.98, which is lower than the starting value in 2019. This could suggest a gradual reduction in emissions over the decade, although the changes are not substantial.
+
+5. **Overall Stability**:
+    - The values do not show a dramatic increase or decrease, reflecting a stable outlook for CO2 emissions in North America, barring any unforeseen changes in policies, economic factors, or technological advancements that could significantly impact emission levels.
+
+These insights indicate that while there are slight variations year-to-year, the overall forecast for CO2 emissions in North America remains fairly consistent, with no major upward or downward trends projected for the next decade.
